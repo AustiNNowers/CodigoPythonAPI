@@ -1,0 +1,206 @@
+import requests
+import pandas as pd
+import os
+from datetime import datetime
+import asyncio
+import aiohttp
+            
+base_url = "https://prologapp.com/prolog/api/v3/"
+end_url = {
+            #"checklists" : "checklists?",
+            #"checklists-work_orders" : "checklists/work-orders?",
+            #"vehicles" : "vehicles?",
+            #"vehicles-types" : "vehicles/types/paginated?",
+            #"vehicles-models" : "vehicles/models/paginated?",
+            #"vehicles-makes" : "vehicles/makes/paginated?",
+            "work_orders" : "work-orders?",
+            #"users" : "users?"
+           }    
+
+token = "código de autenticação"
+
+headers = {
+"x-prolog-api-token" : token,
+"Content-Type" : "application/json"
+}
+
+unidades = {988: "Trasporte", 2083: "Florestal"}
+#pasta_destino = r"C:\Users\LUIS.BRANCO\OneDrive - Vale do Tibagi\OneDrive - Prolog"
+pasta_destino = "C:\\Users\\LUIS.BRANCO\\Prolog\\dados_diarios"
+os.makedirs(pasta_destino, exist_ok=True)
+
+startDate = "2024-12-01"
+endDate = datetime.now().date().strftime("%Y-%m-%d")
+
+async def buscar_dados(endpoint, unidade_id, sessao):
+    pageNumberBackup = 0
+    pageNumber = 0
+    chamados = 0
+    todos_dados = []
+
+    print("entro")
+    print(unidade_id)
+    while True:
+        print("esperando o loop começar")
+        await asyncio.sleep(1.6)
+        print("começo loop")
+        print("Quantidade de chamados: ", chamados)
+        params = {}
+
+        if endpoint == "checklists?":
+            params = {
+                "branchOfficesId" : unidade_id,
+                "startDate" : startDate,
+                "endDate" : endDate,
+                "includeAnswers" : 1,
+                "pageSize" : 100,
+                "pageNumber" : pageNumber
+            }
+        elif endpoint == "checklists/work-orders?":
+            params = {
+                "branchOfficesId" : unidade_id,
+                "startDate" : startDate,
+                "endDate" : endDate,
+                "includeAnswers" : 1,
+                "pageSize" : 100,
+                "pageNumber" : pageNumber
+            }
+        elif endpoint == "work-orders?":
+            params = {
+                "branchOfficesId" : unidade_id,
+                "includeItems" : 1,
+                "pageSize" : 100,
+                "pageNumber" : pageNumber
+            }
+        elif endpoint == "vehicles?":
+            params = {
+                "branchOfficesId" : unidade_id,
+                "includeInactive" : 1,
+                "pageSize" : 100,
+                "pageNumber" : pageNumber
+            }
+        elif endpoint == "vehicles/types/paginated?":
+            params = {
+                "companyId" : 247,
+                "pageSize" : 100,
+                "pageNumber" : pageNumber
+            }
+        elif endpoint == "vehicles/models/paginated?":
+            params = {
+                "companyId" : 247,
+                "pageSize" : 100,
+                "pageNumber" : pageNumber
+            }
+        elif endpoint == "vehicles/makes/paginated?":
+            params = {
+                "companyId" : 247,
+                "pageSize" : 100,
+                "pageNumber" : pageNumber,
+                "includeInactive" : 1,
+                "includeInactiveModels" : 1
+            }
+        elif endpoint == "users?":
+            params = {
+                "branchOfficesId" : unidade_id,
+                "pageSize" : 100,
+                "pageNumber" : pageNumber
+            }
+        print("escolheu os params: ", endpoint)
+
+        try:
+            if chamados <= 20:
+                async with sessao.get(base_url + endpoint, headers=headers, params=params) as response:
+                    chamados += 1
+                    if response.status == 200:
+                        print("Conectou com sucesso")
+                        dados = await response.json()
+                    elif response.status == 502:
+                        print("Erro 502: Bad Gateway")
+                        pageNumberBackup = pageNumber
+                        break
+                    else:
+                        print("Erro ao conectar com a API")
+                        print("Código de status: ", response.status)
+                        break
+
+                    todos_dados.extend(dados.get("content"))
+
+                    if dados.get("lastPage", True):
+                        print(f"Chegou na ultima pagina: {pageNumber}")
+                        break
+                    
+                print("Pagina atual: ", pageNumber)
+                print("Código de status: ", response.status)
+                if pageNumberBackup != 0:
+                    pageNumber = pageNumberBackup
+                    pageNumberBackup = 0
+                else:
+                    pageNumber += 1
+                print("Proxima pagina: ", pageNumber)
+            else:
+                chamados = 0
+                print("Esperando 10 segundos")
+                await asyncio.sleep(10)
+        
+        except requests.exceptions.RequestException as e:
+            print(f"Erro ao conectar com a API: {e}")
+            break
+
+    print("retornando os dados")
+    await asyncio.sleep(60)
+    return pd.DataFrame(todos_dados) if todos_dados else pd.DataFrame()
+
+async def salvar_dados():
+    async with aiohttp.ClientSession() as sessao:
+        for tipo, endpoint in end_url.items():
+            planilhas = []
+            tasks = []
+
+            for unidade_id, nome_unidade in unidades.items():
+                task = buscar_dados(endpoint, unidade_id, sessao)
+                tasks.append(task)
+                
+            dados_unitarios = await asyncio.gather(*tasks)
+
+            for df, nome_unidade in zip(dados_unitarios, unidades.values()):
+                if not df.empty:
+                    df["Unidade"] = nome_unidade
+                    planilhas.append(df)
+
+            print("Indo salvar os arquivos")
+            if planilhas:
+                df_final = pd.concat(planilhas, ignore_index=True)
+                nome_arquivo = os.path.join(pasta_destino, f"dados_{tipo}.xlsx")
+                
+                if endpoint == "checklists/work-orders?":
+                    df_final = df_final.explode("workOrderItems")
+                elif endpoint == "vehicles?":
+                    df_final = pd.json_normalize(df_final.to_dict(orient="records"))
+                    df_final = df_final.explode("coupling.coupledVehicles")
+                elif endpoint == "vehicles/makes/paginated?":
+                    df_final = df_final.explode("models")
+                #elif endpoint == "work-orders?":
+                    #df_final = pd.json_normalize(df_final.to_dict(orient="records"))
+                    #df_final = df_final.explode("workOrderItems")
+                    #df_final = pd.json_normalize(df_final.to_dict(orient="records"))
+                    #df_final = df_final.explode("workOrderItems.itemServices")
+                    #df_final = df_final.explode("workOrderItems.itemProducts")
+                    #df_final = df_final.explode("workOrderItems.openingAttachments")
+                    #df_final = df_final.explode("workOrderItems.resolutionAttachments")
+                
+                #df_final = pd.json_normalize(df_final.to_dict(orient="records"))
+                #df_final = df_final.drop_duplicates()
+                df_final.to_excel(nome_arquivo, index=False, engine="openpyxl")
+
+                print("Dados salvos com sucesso")
+            else:
+                print("Nenhum dado foi salvo")
+
+async def main():
+    await salvar_dados()
+
+asyncio.run(main())
+
+#while True:
+#    salvar_dados()
+#    time.sleep(300)
